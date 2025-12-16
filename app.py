@@ -8,8 +8,8 @@ app.secret_key = 'movie_recommendation_system'
 
 # 数据库配置
 db_config = {
-    'host': 'localhost',
-    'user': 'root',      # 请替换为您的MySQL用户名
+    'host': 'root',
+    'user': '123456',      # 请替换为您的MySQL用户名
     'password': '',       # 请替换为您的MySQL密码
     'database': 'movie_db'
 }
@@ -17,6 +17,47 @@ db_config = {
 # 获取数据库连接
 def get_db_connection():
     return mysql.connector.connect(**db_config)
+
+# 数据库操作辅助函数，确保资源正确释放
+def execute_db_query(query, params=None, fetch_one=False, fetch_all=False, commit=False):
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        
+        if params:
+            cursor.execute(query, params)
+        else:
+            cursor.execute(query)
+        
+        if commit:
+            conn.commit()
+        
+        if fetch_one:
+            return cursor.fetchone()
+        elif fetch_all:
+            return cursor.fetchall()
+        
+        return cursor.lastrowid if cursor.lastrowid else True
+    except Exception as e:
+        print(f"数据库操作错误: {e}")
+        if conn and commit:
+            conn.rollback()
+        return None
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+# 检查用户是否登录的辅助函数
+def check_login():
+    return 'user_id' in session
+
+# 检查用户是否是管理员
+def check_admin():
+    return session.get('role') == 'admin'
 
 # 创建数据库和表
 def setup_database():
@@ -160,26 +201,18 @@ def setup_database():
 @app.route('/')
 def index():
     # 检查用户是否登录
-    if 'user_id' not in session:
+    if not check_login():
         return redirect(url_for('login'))
     
     # 获取推荐电影（评分最高的前8部电影）
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-    
-    cursor.execute("""
+    movies = execute_db_query("""
         SELECT * FROM movies 
         ORDER BY rating DESC 
         LIMIT 8
-    """)
-    movies = cursor.fetchall()
+    """, fetch_all=True)
     
     # 获取所有分类
-    cursor.execute("SELECT * FROM categories")
-    categories = cursor.fetchall()
-    
-    cursor.close()
-    conn.close()
+    categories = execute_db_query("SELECT * FROM categories", fetch_all=True)
     
     return render_template('index.html', movies=movies, categories=categories, user=session)
 
@@ -187,23 +220,18 @@ def index():
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     # 如果已经登录，重定向到首页
-    if 'user_id' in session:
+    if check_login():
         return redirect(url_for('index'))
     
     if request.method == 'POST':
         username = request.form['username']
         password = request.form['password']
         
-        conn = get_db_connection()
-        cursor = conn.cursor(dictionary=True)
-        
-        cursor.execute("SELECT * FROM users WHERE username = %s", (username,))
-        user = cursor.fetchone()
-        
-        cursor.close()
-        conn.close()
+        # 获取用户信息
+        user = execute_db_query("SELECT * FROM users WHERE username = %s", (username,), fetch_one=True)
         
         # 注意：bcrypt.checkpw需要两个bytes参数，从数据库取出的密码已经是bytes格式
+        # 确保user不为None再进行密码比较，避免TypeError
         if user and bcrypt.checkpw(password.encode('utf-8'), user['password']):
             session['user_id'] = user['id']
             session['username'] = user['username']
@@ -218,7 +246,7 @@ def login():
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     # 如果已经登录，重定向到首页
-    if 'user_id' in session:
+    if check_login():
         return redirect(url_for('index'))
     
     if request.method == 'POST':
@@ -234,28 +262,27 @@ def register():
             return render_template('register.html', error='密码必须至少6个字符')
         
         # 检查用户名和邮箱是否已存在
-        conn = get_db_connection()
-        cursor = conn.cursor(dictionary=True)
-        
-        cursor.execute("SELECT * FROM users WHERE username = %s OR email = %s", (username, email))
-        existing_user = cursor.fetchone()
+        existing_user = execute_db_query(
+            "SELECT * FROM users WHERE username = %s OR email = %s", 
+            (username, email), 
+            fetch_one=True
+        )
         
         if existing_user:
-            cursor.close()
-            conn.close()
             return render_template('register.html', error='用户名或邮箱已存在')
         
         # 创建新用户
         hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
-        cursor.execute(
+        result = execute_db_query(
             "INSERT INTO users (username, email, password) VALUES (%s, %s, %s)",
-            (username, email, hashed_password)
+            (username, email, hashed_password),
+            commit=True
         )
         
-        cursor.close()
-        conn.close()
-        
-        return redirect(url_for('login'))
+        if result:
+            return redirect(url_for('login'))
+        else:
+            return render_template('register.html', error='注册失败，请稍后再试')
     
     return render_template('register.html')
 
@@ -268,148 +295,124 @@ def logout():
 # 搜索路由
 @app.route('/search', methods=['POST'])
 def search():
-    if 'user_id' not in session:
+    if not check_login():
         return redirect(url_for('login'))
     
     query = request.form['query']
     
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-    
-    cursor.execute("""
+    # 执行搜索查询
+    movies = execute_db_query("""
         SELECT * FROM movies 
         WHERE title LIKE %s OR director LIKE %s OR genre LIKE %s
         ORDER BY rating DESC
-    """, (f'%{query}%', f'%{query}%', f'%{query}%'))
-    
-    movies = cursor.fetchall()
-    
-    cursor.close()
-    conn.close()
+    """, (f'%{query}%', f'%{query}%', f'%{query}%'), fetch_all=True)
     
     return render_template('search_results.html', movies=movies, query=query, user=session)
 
 # 分类路由
 @app.route('/category/<int:category_id>')
 def category(category_id):
-    if 'user_id' not in session:
+    if not check_login():
         return redirect(url_for('login'))
     
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-    
     # 获取分类名称
-    cursor.execute("SELECT name FROM categories WHERE id = %s", (category_id,))
-    category = cursor.fetchone()
+    category = execute_db_query("SELECT name FROM categories WHERE id = %s", (category_id,), fetch_one=True)
     
     if not category:
         return redirect(url_for('index'))
     
     # 获取该分类下的电影
-    cursor.execute("""
+    movies = execute_db_query("""
         SELECT m.* FROM movies m
         JOIN movie_categories mc ON m.id = mc.movie_id
         WHERE mc.category_id = %s
         ORDER BY m.rating DESC
-    """, (category_id,))
-    
-    movies = cursor.fetchall()
-    
-    cursor.close()
-    conn.close()
+    """, (category_id,), fetch_all=True)
     
     return render_template('category.html', movies=movies, category=category, user=session)
 
 # 电影详情路由
 @app.route('/movie/<int:movie_id>')
 def movie_detail(movie_id):
-    if 'user_id' not in session:
+    if not check_login():
         return redirect(url_for('login'))
     
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-    
     # 获取电影详情
-    cursor.execute("SELECT * FROM movies WHERE id = %s", (movie_id,))
-    movie = cursor.fetchone()
+    movie = execute_db_query("SELECT * FROM movies WHERE id = %s", (movie_id,), fetch_one=True)
     
     if not movie:
         return redirect(url_for('index'))
     
     # 获取用户评分
-    cursor.execute("""
+    ratings = execute_db_query("""
         SELECT r.rating, r.review, u.username
         FROM ratings r
         JOIN users u ON r.user_id = u.id
         WHERE r.movie_id = %s
         ORDER BY r.created_at DESC
-    """, (movie_id,))
-    
-    ratings = cursor.fetchall()
+    """, (movie_id,), fetch_all=True)
     
     # 检查当前用户是否已评分
-    user_rating = None
-    cursor.execute(
+    user_rating = execute_db_query(
         "SELECT * FROM ratings WHERE user_id = %s AND movie_id = %s",
-        (session['user_id'], movie_id)
+        (session['user_id'], movie_id),
+        fetch_one=True
     )
-    user_rating = cursor.fetchone()
-    
-    cursor.close()
-    conn.close()
     
     return render_template('movie_detail.html', movie=movie, ratings=ratings, user_rating=user_rating, user=session)
 
 # 评分路由
 @app.route('/rate/<int:movie_id>', methods=['POST'])
 def rate_movie(movie_id):
-    if 'user_id' not in session:
+    if not check_login():
         return redirect(url_for('login'))
     
     rating = request.form['rating']
     review = request.form.get('review', '')
     
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # 检查是否已评分
-    cursor.execute(
-        "SELECT * FROM ratings WHERE user_id = %s AND movie_id = %s",
-        (session['user_id'], movie_id)
-    )
-    existing_rating = cursor.fetchone()
-    
-    if existing_rating:
-        # 更新评分
-        cursor.execute(
-            "UPDATE ratings SET rating = %s, review = %s WHERE user_id = %s AND movie_id = %s",
-            (rating, review, session['user_id'], movie_id)
+    try:
+        # 检查是否已评分
+        existing_rating = execute_db_query(
+            "SELECT * FROM ratings WHERE user_id = %s AND movie_id = %s",
+            (session['user_id'], movie_id),
+            fetch_one=True
         )
-    else:
-        # 添加新评分
-        cursor.execute(
-            "INSERT INTO ratings (user_id, movie_id, rating, review) VALUES (%s, %s, %s, %s)",
-            (session['user_id'], movie_id, rating, review)
+        
+        if existing_rating:
+            # 更新评分
+            result = execute_db_query(
+                "UPDATE ratings SET rating = %s, review = %s WHERE user_id = %s AND movie_id = %s",
+                (rating, review, session['user_id'], movie_id),
+                commit=True
+            )
+        else:
+            # 添加新评分
+            result = execute_db_query(
+                "INSERT INTO ratings (user_id, movie_id, rating, review) VALUES (%s, %s, %s, %s)",
+                (session['user_id'], movie_id, rating, review),
+                commit=True
+            )
+        
+        if result is None:
+            return redirect(url_for('movie_detail', movie_id=movie_id))
+        
+        # 更新电影平均评分
+        execute_db_query(
+            "UPDATE movies SET rating = (SELECT AVG(rating) FROM ratings WHERE movie_id = %s) WHERE id = %s",
+            (movie_id, movie_id),
+            commit=True
         )
-    
-    # 更新电影平均评分
-    cursor.execute("""
-        UPDATE movies SET rating = (
-            SELECT AVG(rating) FROM ratings WHERE movie_id = %s
-        ) WHERE id = %s
-    """, (movie_id, movie_id))
-    
-    conn.commit()
-    cursor.close()
-    conn.close()
-    
-    return redirect(url_for('movie_detail', movie_id=movie_id))
+        
+        return redirect(url_for('movie_detail', movie_id=movie_id))
+    except Exception as e:
+        print(f"评分操作失败: {e}")
+        return redirect(url_for('movie_detail', movie_id=movie_id))
 
 # 管理员路由 - 添加电影
 @app.route('/admin/add_movie', methods=['GET', 'POST'])
 def admin_add_movie():
     # 检查是否登录且是管理员
-    if 'user_id' not in session or session.get('role') != 'admin':
+    if not check_login() or not check_admin():
         return redirect(url_for('login'))
     
     if request.method == 'POST':
@@ -420,38 +423,39 @@ def admin_add_movie():
         description = request.form['description']
         image_url = request.form.get('image_url', '')
         
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # 添加电影
-        cursor.execute(
-            "INSERT INTO movies (title, director, year, genre, description, image_url) VALUES (%s, %s, %s, %s, %s, %s)",
-            (title, director, year, genre, description, image_url)
-        )
-        
-        movie_id = cursor.lastrowid
-        
-        # 添加分类关联
-        categories = request.form.getlist('categories')
-        for category_id in categories:
-            cursor.execute(
-                "INSERT INTO movie_categories (movie_id, category_id) VALUES (%s, %s)",
-                (movie_id, category_id)
+        try:
+            # 添加电影
+            movie_id = execute_db_query(
+                "INSERT INTO movies (title, director, year, genre, description, image_url) VALUES (%s, %s, %s, %s, %s, %s)",
+                (title, director, year, genre, description, image_url),
+                commit=True
             )
-        
-        conn.commit()
-        cursor.close()
-        conn.close()
-        
-        return redirect(url_for('admin_panel'))
+            
+            if movie_id is None:
+                return render_template('admin_add_movie.html', 
+                                     categories=execute_db_query("SELECT * FROM categories", fetch_all=True), 
+                                     user=session, 
+                                     error='添加电影失败')
+            
+            # 添加分类关联
+            categories = request.form.getlist('categories')
+            for category_id in categories:
+                execute_db_query(
+                    "INSERT INTO movie_categories (movie_id, category_id) VALUES (%s, %s)",
+                    (movie_id, category_id),
+                    commit=True
+                )
+            
+            return redirect(url_for('admin_panel'))
+        except Exception as e:
+            print(f"添加电影错误: {e}")
+            return render_template('admin_add_movie.html', 
+                                 categories=execute_db_query("SELECT * FROM categories", fetch_all=True), 
+                                 user=session, 
+                                 error='添加电影失败')
     
     # 获取所有分类
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM categories")
-    categories = cursor.fetchall()
-    cursor.close()
-    conn.close()
+    categories = execute_db_query("SELECT * FROM categories", fetch_all=True)
     
     return render_template('admin_add_movie.html', categories=categories, user=session)
 
@@ -459,18 +463,11 @@ def admin_add_movie():
 @app.route('/admin')
 def admin_panel():
     # 检查是否登录且是管理员
-    if 'user_id' not in session or session.get('role') != 'admin':
+    if not check_login() or not check_admin():
         return redirect(url_for('login'))
     
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-    
     # 获取所有电影
-    cursor.execute("SELECT * FROM movies ORDER BY created_at DESC")
-    movies = cursor.fetchall()
-    
-    cursor.close()
-    conn.close()
+    movies = execute_db_query("SELECT * FROM movies ORDER BY created_at DESC", fetch_all=True)
     
     return render_template('admin_panel.html', movies=movies, user=session)
 
@@ -478,26 +475,23 @@ def admin_panel():
 @app.route('/admin/delete_movie/<int:movie_id>')
 def admin_delete_movie(movie_id):
     # 检查是否登录且是管理员
-    if 'user_id' not in session or session.get('role') != 'admin':
+    if not check_login() or not check_admin():
         return redirect(url_for('login'))
     
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # 删除电影相关评分
-    cursor.execute("DELETE FROM ratings WHERE movie_id = %s", (movie_id,))
-    
-    # 删除电影分类关联
-    cursor.execute("DELETE FROM movie_categories WHERE movie_id = %s", (movie_id,))
-    
-    # 删除电影
-    cursor.execute("DELETE FROM movies WHERE id = %s", (movie_id,))
-    
-    conn.commit()
-    cursor.close()
-    conn.close()
-    
-    return redirect(url_for('admin_panel'))
+    try:
+        # 删除电影相关评分
+        execute_db_query("DELETE FROM ratings WHERE movie_id = %s", (movie_id,), commit=True)
+        
+        # 删除电影分类关联
+        execute_db_query("DELETE FROM movie_categories WHERE movie_id = %s", (movie_id,), commit=True)
+        
+        # 删除电影
+        execute_db_query("DELETE FROM movies WHERE id = %s", (movie_id,), commit=True)
+        
+        return redirect(url_for('admin_panel'))
+    except Exception as e:
+        print(f"删除电影错误: {e}")
+        return redirect(url_for('admin_panel'))
 
 if __name__ == '__main__':
     # 初始化数据库
