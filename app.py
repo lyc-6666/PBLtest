@@ -203,7 +203,8 @@ def login():
         cursor.close()
         conn.close()
         
-        if user and bcrypt.checkpw(password.encode('utf-8'), user['password'].encode('utf-8')):
+        # 注意：bcrypt.checkpw需要两个bytes参数，从数据库取出的密码已经是bytes格式
+        if user and bcrypt.checkpw(password.encode('utf-8'), user['password']):
             session['user_id'] = user['id']
             session['username'] = user['username']
             session['role'] = user['role']
