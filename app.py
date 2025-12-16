@@ -8,9 +8,9 @@ app.secret_key = 'movie_recommendation_system'
 
 # 数据库配置
 db_config = {
-    'host': 'root',
-    'user': '123456',      # 请替换为您的MySQL用户名
-    'password': '',       # 请替换为您的MySQL密码
+    'host': 'localhost',
+    'user': 'root',      # 请替换为您的MySQL用户名
+    'password': '123456',       # 请替换为您的MySQL密码
     'database': 'movie_db'
 }
 
