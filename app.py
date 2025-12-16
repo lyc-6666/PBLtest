@@ -2,17 +2,22 @@ from flask import Flask, render_template, request, redirect, url_for, session, j
 import mysql.connector
 import bcrypt
 from datetime import datetime
+import os
 
 app = Flask(__name__)
 app.secret_key = 'movie_recommendation_system'
 
-# 数据库配置
+# 数据库配置 - 从环境变量获取或使用默认值
 db_config = {
-    'host': 'localhost',
-    'user': 'root',      # 请替换为您的MySQL用户名
-    'password': '123456',       # 请替换为您的MySQL密码
-    'database': 'movie_db'
+    'host': os.getenv('DB_HOST', 'localhost'),
+    'user': os.getenv('DB_USER', 'root'),
+    'password': os.getenv('DB_PASSWORD', '123456'),  # 默认密码，建议使用环境变量
+    'database': os.getenv('DB_NAME', 'movie_db')
 }
+
+# 打印当前数据库配置（不包含密码）
+print(f"数据库配置: 主机={db_config['host']}, 用户={db_config['user']}, 数据库={db_config['database']}")
+print("注意: 如果连接失败，请检查MySQL服务是否运行，以及用户名和密码是否正确。")
 
 # 获取数据库连接
 def get_db_connection():
@@ -63,11 +68,20 @@ def check_admin():
 def setup_database():
     try:
         # 连接到MySQL服务器（不指定数据库）
-        conn = mysql.connector.connect(
-            host='localhost',
-            user='root',  # 请替换为您的MySQL用户名
-            password=''    # 请替换为您的MySQL密码
-        )
+        try:
+            conn = mysql.connector.connect(
+                host=db_config['host'],
+                user=db_config['user'],
+                password=db_config['password'] if db_config['password'] else ''
+            )
+            print("成功连接到MySQL服务器")
+        except mysql.connector.Error as err:
+            print(f"连接MySQL失败: {err}")
+            print("请检查:")
+            print("1. MySQL服务是否正在运行")
+            print("2. 用户名和密码是否正确")
+            print("3. 是否有足够的权限创建数据库")
+            raise
         cursor = conn.cursor()
         
         # 创建数据库
